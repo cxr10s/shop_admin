@@ -544,6 +544,8 @@
         .estado-btn[data-estado="pagado"].active     { background: rgba(34,197,94,0.15);  color: #22c55e;          border-color: #22c55e; }
         .estado-btn[data-estado="enviado"]:hover,
         .estado-btn[data-estado="enviado"].active    { background: rgba(59,130,246,0.15);  color: var(--enviado);   border-color: var(--enviado); }
+        .estado-btn[data-estado="preparado"]:hover,
+        .estado-btn[data-estado="preparado"].active  { background: rgba(59,130,246,0.15);  color: var(--enviado);   border-color: var(--enviado); }
         .estado-btn[data-estado="entregado"]:hover,
         .estado-btn[data-estado="entregado"].active  { background: rgba(34,197,94,0.15);   color: var(--entregado); border-color: var(--entregado); }
         .estado-btn[data-estado="cancelado"]:hover,
@@ -971,7 +973,7 @@ function actualizarStats() {
     const ingresosPagados = p.filter(x => x.estado_pago === 'pagado').reduce((s, x) => s + Number(x.total), 0);
     document.getElementById('stat-total').textContent      = p.length;
     document.getElementById('stat-pendientes').textContent = p.filter(x => x.estado === 'pendiente').length;
-    document.getElementById('stat-enviados').textContent   = p.filter(x => x.estado === 'enviado').length;
+    document.getElementById('stat-enviados').textContent   = p.filter(x => x.estado === 'enviado' || x.estado === 'preparado').length;
     document.getElementById('stat-entregados').textContent = p.filter(x => x.estado === 'entregado').length;
     document.getElementById('stat-ingresos').textContent   = '$' + fmt(ingresosPagados);
     // Actualizar counter de pagados si existe
@@ -1167,16 +1169,17 @@ function abrirModal(id) {
     const esCancelado = p.estado === 'cancelado' || ep === 'cancelado';
 
     // Estados disponibles según tipo de entrega
-    // Recogida: sin "enviado" | Domicilio: todos
+    // Recogida: pendiente → pagado → preparado → entregado
+    // Domicilio: pendiente → pagado → enviado → entregado
     const todosEstados = esRecogida
-        ? ['pendiente', 'cancelado', 'pagado', 'entregado']
+        ? ['pendiente', 'cancelado', 'pagado', 'preparado', 'entregado']
         : ['pendiente', 'cancelado', 'pagado', 'enviado', 'entregado'];
 
     // Lógica de habilitación según estado actual:
     // cancelado  → solo "cancelado" activo (ya no se puede cambiar)
-    // pendiente  → todos excepto cancelado, pagado, enviado (con not-allowed)
-    // pagado     → pagado, enviado, entregado activos | pendiente y cancelado not-allowed
-    // enviado    → solo entregado activo
+    // pendiente  → solo pagado disponible como siguiente paso
+    // pagado     → pagado, {enviado|preparado}, entregado activos
+    // enviado/preparado → solo entregado activo
     // entregado  → ninguno activo (pedido finalizado)
     function puedeActivar(estadoBtn) {
         // Si está cancelado, ninguno disponible (pedido cerrado)
@@ -1185,15 +1188,20 @@ function abrirModal(id) {
         if (estadoBtn === 'cancelado') return true;
         // Lógica de flujo natural (con not-allowed visual, no bloqueo real):
         if (p.estado === 'pendiente') return ['pendiente', 'pagado'].includes(estadoBtn);
-        if (p.estado === 'pagado')    return ['pagado', 'enviado', 'entregado'].includes(estadoBtn);
+        if (p.estado === 'pagado') {
+            return esRecogida
+                ? ['pagado', 'preparado', 'entregado'].includes(estadoBtn)
+                : ['pagado', 'enviado', 'entregado'].includes(estadoBtn);
+        }
         if (p.estado === 'enviado')   return ['enviado', 'entregado'].includes(estadoBtn);
+        if (p.estado === 'preparado') return ['preparado', 'entregado'].includes(estadoBtn);
         if (p.estado === 'entregado') return estadoBtn === 'entregado';
         return true;
     }
 
     const labelMap = {
         pendiente: 'Pendiente', cancelado: 'Cancelado',
-        pagado: 'Pagado', enviado: 'Enviado', entregado: 'Entregado'
+        pagado: 'Pagado', enviado: 'Enviado', preparado: 'Preparado', entregado: 'Entregado'
     };
 
     // Animación solo para estado "pagado" cuando es el estado actual
@@ -1224,7 +1232,8 @@ function abrirModal(id) {
 
     // Armar mensaje de WhatsApp
     const waLabel   = p.nombre.split(' ')[0];
-    const waEstado  = p.estado === 'enviado' ? `Tu pedido #${idCorto} ya fue enviado. Pronto lo recibirás.` :
+    const waEstado  = p.estado === 'enviado'   ? `Tu pedido #${idCorto} ya fue enviado. Pronto lo recibirás.` :
+                      p.estado === 'preparado' ? `Tu pedido #${idCorto} ya está listo para recoger en tienda.` :
                       p.estado === 'entregado' ? `Tu pedido #${idCorto} ha sido entregado. ¡Gracias por tu compra!` :
                       `Te escribimos sobre tu pedido #${idCorto}.`;
     const waMsg     = encodeURIComponent(`Hola ${waLabel}, ${waEstado}`);
@@ -1389,14 +1398,35 @@ async function cambiarEstado(id, nuevoEstado) {
         abrirModal(id); // refresca el modal para mostrar el nuevo estado (ej. botón Eliminar)
         showToast('Estado actualizado: ' + nuevoEstado.toUpperCase(), '#c8ff00');
 
-        // Enviar correo de "pedido en preparación" al confirmar el pago
-        if (nuevoEstado === 'pagado' && p.email) {
+        // Enviar correo de notificación según el nuevo estado (usa la misma plantilla genérica)
+        const NOTIF_CONFIG = {
+            pagado: {
+                titulo:  'Tu pedido está en preparación',
+                mensaje: 'Recibimos tu pago y ya estamos preparando tu pedido. Te avisaremos cuando esté listo.',
+                nota:    'Usa tu número de pedido en la sección "Mis pedidos" para hacerle seguimiento.'
+            },
+            preparado: {
+                titulo:  '¡Tu pedido ya está listo! 🛍️',
+                mensaje: 'Tu pedido ya está empacado y listo para que pases a recogerlo en tienda.',
+                nota:    'Muestra tu número de pedido al llegar a la tienda para recibirlo más rápido.'
+            },
+            enviado: {
+                titulo:  '¡Tu pedido va en camino! 🚚',
+                mensaje: 'Tu pedido ya salió de nuestra tienda y va camino a tu dirección. Pronto lo recibirás.',
+                nota:    'Ten a la mano tu número de pedido por si el repartidor necesita confirmarlo.'
+            }
+        };
+        const notif = NOTIF_CONFIG[nuevoEstado];
+        if (notif && p.email) {
             const idCorto = p.id.substring(0, 8).toUpperCase();
             emailjs.send(EMAILJS_SERVICE_ID, EMAILJS_TPL_PREP, {
                 email:     p.email,
                 nombre:    p.nombre || 'Cliente',
                 pedido_id: idCorto,
-                total:     '$' + fmt(p.total) + ' COP'
+                total:     '$' + fmt(p.total) + ' COP',
+                titulo:    notif.titulo,
+                mensaje:   notif.mensaje,
+                nota:      notif.nota
             }).catch(err => {
                 console.error(err);
                 showToast('⚠️ Estado guardado, pero falló el envío del correo', '#f59e0b');
