@@ -836,6 +836,8 @@ async function doLogin() {
             document.getElementById('dashboard').style.display    = 'block';
             actualizarFecha();
             cargarPedidos();
+            iniciarSweepPeriodico();
+            iniciarInactividad();
         } else {
             errEl.textContent = 'Usuario o contraseña incorrectos.';
             errEl.style.display = 'block';
@@ -855,6 +857,50 @@ function doLogout() {
     document.getElementById('admin-user').value = '';
     document.getElementById('admin-pass').value = '';
     todosLosPedidos = [];
+    detenerSweepPeriodico();
+    detenerInactividad();
+}
+
+// ── SWEEP PERIÓDICO: revisa pedidos abandonados aunque nadie actualice ──
+let sweepTimer = null;
+function iniciarSweepPeriodico() {
+    clearInterval(sweepTimer);
+    sweepTimer = setInterval(() => {
+        if (todosLosPedidos.length) autoCancelarPendientes(todosLosPedidos).then(() => {
+            actualizarStats();
+            renderTabla(pedidosFiltrados());
+        });
+    }, 2 * 60 * 1000); // cada 2 minutos
+}
+function detenerSweepPeriodico() {
+    clearInterval(sweepTimer);
+    sweepTimer = null;
+}
+
+// ── CIERRE DE SESIÓN POR INACTIVIDAD (10 min) ─────────────────────
+const LIMITE_INACTIVIDAD_MS = 10 * 60 * 1000;
+let inactividadTimer = null;
+
+function resetInactividad() {
+    clearTimeout(inactividadTimer);
+    inactividadTimer = setTimeout(() => {
+        showToast('Sesión cerrada por inactividad', '#f59e0b');
+        doLogout();
+    }, LIMITE_INACTIVIDAD_MS);
+}
+
+function iniciarInactividad() {
+    ['mousemove', 'keydown', 'click', 'scroll', 'touchstart'].forEach(ev =>
+        document.addEventListener(ev, resetInactividad)
+    );
+    resetInactividad();
+}
+
+function detenerInactividad() {
+    clearTimeout(inactividadTimer);
+    ['mousemove', 'keydown', 'click', 'scroll', 'touchstart'].forEach(ev =>
+        document.removeEventListener(ev, resetInactividad)
+    );
 }
 
 function actualizarFecha() {
@@ -878,12 +924,38 @@ async function supabaseFetch(path, options = {}) {
     return res.json();
 }
 
+// ── AUTO-CANCELAR PEDIDOS ABANDONADOS (pendientes > 15 min) ──────
+const LIMITE_PENDIENTE_MS = 15 * 60 * 1000; // 15 minutos
+
+async function autoCancelarPendientes(pedidos) {
+    const ahora = Date.now();
+    const vencidos = pedidos.filter(p =>
+        p.estado === 'pendiente' &&
+        p.created_at &&
+        (ahora - new Date(p.created_at).getTime()) > LIMITE_PENDIENTE_MS
+    );
+    if (vencidos.length === 0) return;
+
+    await Promise.all(vencidos.map(p =>
+        supabaseFetch(`pedidos?id=eq.${p.id}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ estado: 'cancelado', estado_pago: 'cancelado' })
+        }).then(() => {
+            p.estado = 'cancelado';
+            p.estado_pago = 'cancelado';
+        }).catch(() => {})
+    ));
+
+    showToast(`⏱️ ${vencidos.length} pedido(s) sin pagar en 15 min se cancelaron automáticamente`, '#f59e0b');
+}
+
 // ── CARGAR PEDIDOS ──
 async function cargarPedidos() {
     document.getElementById('table-body').innerHTML =
         '<div class="loading"><i class="fa-solid fa-spinner fa-spin"></i>&nbsp; Cargando pedidos...</div>';
     try {
         todosLosPedidos = await supabaseFetch('pedidos?order=created_at.desc&select=*');
+        await autoCancelarPendientes(todosLosPedidos);
         actualizarStats();
         renderTabla(pedidosFiltrados());
         return todosLosPedidos; // permite .then() encadenado
