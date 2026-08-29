@@ -771,6 +771,7 @@
 <!-- TOAST -->
 <div id="admin-toast"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
 <script>
 function fmt(n) {
     return Math.round(Number(n)).toLocaleString('es-CO');
@@ -780,6 +781,11 @@ const WA_NUMBER = '573116039256';
 
 const SUPABASE_URL  = 'https://qvaaistunotxgpyqebya.supabase.co';
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InF2YWFpc3R1bm90eGdweXFlYnlhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQxMTk2MzMsImV4cCI6MjA4OTY5NTYzM30.eG62aFEYEtigW7Vb9wJ2VCDK4HVzKCxEredHmVNZXjU';
+
+const EMAILJS_PUBLIC_KEY = '_QeHPuEy03OrqCucj';
+const EMAILJS_SERVICE_ID = 'service_2596ed9';
+const EMAILJS_TPL_PREP   = 'template_m12jae7';
+emailjs.init(EMAILJS_PUBLIC_KEY);
 
 let todosLosPedidos = [];
 let filtroActual    = 'todos';
@@ -1102,7 +1108,8 @@ function abrirModal(id) {
     function puedeActivar(estadoBtn) {
         // Si está cancelado, ninguno disponible (pedido cerrado)
         if (esCancelado) return estadoBtn === 'cancelado';
-        // En cualquier otro estado, el admin puede cambiar libremente
+        // "cancelado" siempre disponible mientras el pedido no esté cerrado
+        if (estadoBtn === 'cancelado') return true;
         // Lógica de flujo natural (con not-allowed visual, no bloqueo real):
         if (p.estado === 'pendiente') return ['pendiente', 'pagado'].includes(estadoBtn);
         if (p.estado === 'pagado')    return ['pagado', 'enviado', 'entregado'].includes(estadoBtn);
@@ -1248,6 +1255,11 @@ function abrirModal(id) {
                 href="https://wa.me/${waPhone}?text=${waMsg}" target="_blank" rel="noopener">
                 <i class="fa-brands fa-whatsapp"></i> Enviar por WhatsApp
             </a>
+            ${esCancelado ? `
+            <button class="modal-action-btn" style="color:#ef4444;border-color:#ef4444;"
+                onclick="eliminarPedido('${p.id}')">
+                <i class="fa-solid fa-trash"></i> Eliminar pedido
+            </button>` : ''}
         </div>
     `;
 
@@ -1278,11 +1290,11 @@ async function cambiarEstado(id, nuevoEstado) {
     const p = todosLosPedidos.find(x => x.id === id);
     if (!p) return;
 
-    const ep = p.estado_pago || 'pendiente';
-
     // Si se está poniendo "pagado", actualizar también estado_pago en Supabase
+    // Si se está cancelando, marcar también estado_pago: cancelado
     const body = { estado: nuevoEstado };
-    if (nuevoEstado === 'pagado') body.estado_pago = 'pagado';
+    if (nuevoEstado === 'pagado')    body.estado_pago = 'pagado';
+    if (nuevoEstado === 'cancelado') body.estado_pago = 'cancelado';
 
     try {
         await supabaseFetch(`pedidos?id=eq.${id}`, {
@@ -1291,7 +1303,8 @@ async function cambiarEstado(id, nuevoEstado) {
         });
         if (p) {
             p.estado = nuevoEstado;
-            if (nuevoEstado === 'pagado') p.estado_pago = 'pagado';
+            if (nuevoEstado === 'pagado')    p.estado_pago = 'pagado';
+            if (nuevoEstado === 'cancelado') p.estado_pago = 'cancelado';
         }
 
         document.querySelectorAll('.estado-btn').forEach(btn => {
@@ -1300,9 +1313,47 @@ async function cambiarEstado(id, nuevoEstado) {
 
         actualizarStats();
         renderTabla(pedidosFiltrados());
+        abrirModal(id); // refresca el modal para mostrar el nuevo estado (ej. botón Eliminar)
         showToast('Estado actualizado: ' + nuevoEstado.toUpperCase(), '#c8ff00');
+
+        // Enviar correo de "pedido en preparación" al confirmar el pago
+        if (nuevoEstado === 'pagado' && p.email) {
+            const idCorto = p.id.substring(0, 8).toUpperCase();
+            emailjs.send(EMAILJS_SERVICE_ID, EMAILJS_TPL_PREP, {
+                email:     p.email,
+                nombre:    p.nombre || 'Cliente',
+                pedido_id: idCorto,
+                total:     '$' + fmt(p.total) + ' COP'
+            }).catch(err => {
+                console.error(err);
+                showToast('⚠️ Estado guardado, pero falló el envío del correo', '#f59e0b');
+            });
+        }
     } catch (e) {
         showToast('Error al cambiar estado', '#ef4444');
+    }
+}
+
+// ── ELIMINAR PEDIDO (solo si está cancelado) ─────────────────────
+async function eliminarPedido(id) {
+    const p = todosLosPedidos.find(x => x.id === id);
+    if (!p) return;
+    const esCancelado = p.estado === 'cancelado' || p.estado_pago === 'cancelado';
+    if (!esCancelado) {
+        showToast('Solo se pueden eliminar pedidos cancelados', '#f59e0b');
+        return;
+    }
+    if (!confirm(`¿Eliminar definitivamente el pedido #${p.id.substring(0,8).toUpperCase()}? Esta acción no se puede deshacer.`)) return;
+
+    try {
+        await supabaseFetch(`pedidos?id=eq.${id}`, { method: 'DELETE' });
+        todosLosPedidos = todosLosPedidos.filter(x => x.id !== id);
+        cerrarModal();
+        actualizarStats();
+        renderTabla(pedidosFiltrados());
+        showToast('✓ Pedido eliminado', '#22c55e');
+    } catch (e) {
+        showToast('Error al eliminar el pedido', '#ef4444');
     }
 }
 
