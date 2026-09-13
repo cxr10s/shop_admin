@@ -905,6 +905,50 @@ function detenerInactividad() {
     );
 }
 
+// ── CIERRE DE SESIÓN POR AUSENCIA (5 min) — para móvil ────────────
+// El mecanismo de arriba depende de que la pestaña siga ejecutándose
+// (setTimeout). En móvil, al cambiar de app o bloquear el celular sin
+// cerrar la pestaña, el sistema puede suspender esa ejecución, así que
+// el timer nunca llega a dispararse y el panel queda abierto. Esto
+// guarda la hora en localStorage (sobrevive a la suspensión) y, al
+// volver, revisa cuánto tiempo pasó — si son más de 5 min, cierra
+// sesión de inmediato.
+(function() {
+    const LIMITE_AUSENCIA_MS = 5 * 60 * 1000;
+    const STORAGE_KEY = 'shop_admin_last_active_ts';
+
+    function marcarUltimaActividadAdmin() {
+        try { localStorage.setItem(STORAGE_KEY, String(Date.now())); } catch (e) {}
+    }
+
+    function panelVisible() {
+        const el = document.getElementById('dashboard');
+        return !!el && el.style.display === 'block';
+    }
+
+    function revisarAusenciaAdmin() {
+        if (!panelVisible()) { marcarUltimaActividadAdmin(); return; }
+        let ultima = 0;
+        try { ultima = parseInt(localStorage.getItem(STORAGE_KEY) || '0', 10); } catch (e) {}
+        if (ultima && (Date.now() - ultima) > LIMITE_AUSENCIA_MS) {
+            doLogout();
+            showToast('Sesión cerrada: estuviste fuera más de 5 minutos', '#f59e0b');
+        }
+        marcarUltimaActividadAdmin();
+    }
+
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) marcarUltimaActividadAdmin();
+        else revisarAusenciaAdmin();
+    });
+    window.addEventListener('pageshow', revisarAusenciaAdmin);
+    setTimeout(revisarAusenciaAdmin, 1000);
+
+    ['mousemove', 'keydown', 'click', 'scroll', 'touchstart'].forEach(ev =>
+        document.addEventListener(ev, marcarUltimaActividadAdmin)
+    );
+})();
+
 function actualizarFecha() {
     document.getElementById('topbar-fecha').textContent =
         new Date().toLocaleDateString('es-CO', { weekday:'long', year:'numeric', month:'long', day:'numeric' });
